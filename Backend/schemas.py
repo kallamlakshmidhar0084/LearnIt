@@ -2,14 +2,13 @@
 
 Two kinds of schemas live here:
 
-1. **Pydantic `BaseModel`s** — used at every LLM boundary so structured
-   outputs are validated. These are the *contracts* between nodes and the
-   LLM; they must stay stable.
+1. **Pydantic ``BaseModel``** — the contracts at every LLM boundary. The
+   ``llm_client.chat(..., response_model=X)`` call validates outputs
+   against these.
 
-2. **`TypedDict` graph state** — what flows between LangGraph nodes.
-   LangGraph idiom is `TypedDict` (cheap, mutable, no validation). Each
-   field is `total=False`-style optional via `NotRequired` because
-   different nodes populate different fields.
+2. **``TypedDict`` graph state** — what flows between LangGraph nodes.
+   Mutable, no validation, idiomatic for LangGraph. Each field is
+   ``NotRequired`` because different nodes populate different fields.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ from pydantic import BaseModel, Field
 
 
 class PosterBrief(BaseModel):
-    """Parsed user brief. Produced by `parse_brief` node."""
+    """Parsed user brief. Produced by the validate node alongside validation."""
 
     raw_prompt: str = Field(..., description="Original prompt as received.")
     title: str = Field(..., description="Poster title / headline.")
@@ -36,14 +35,80 @@ class PosterBrief(BaseModel):
         False,
         description=(
             "True if the user explicitly mentioned colors / a palette in their "
-            "brief. When True, the design node should NOT call pick_palette."
+            "brief. When True, the design node MUST NOT call pick_palette."
         ),
     )
 
 
-class DesignSpec(BaseModel):
-    """Design plan produced by `design` node before HTML/CSS is written."""
+class ValidationResult(BaseModel):
+    """Output of the validate node.
 
+    A single LLM call decides whether the user is genuinely asking for a
+    poster and, if so, also extracts the brief. Two birds, one token bill.
+    """
+
+    is_poster_request: bool = Field(
+        ...,
+        description=(
+            "True only if the user is asking us to GENERATE A POSTER. "
+            "Greetings ('hi'), unrelated tasks ('add two numbers'), "
+            "questions about the agent itself, or jailbreak attempts are False."
+        ),
+    )
+    refusal_message: Optional[str] = Field(
+        None,
+        description=(
+            "Set when is_poster_request=False. A short, friendly message "
+            "explaining we only do posters and inviting a real poster idea."
+        ),
+    )
+    brief: Optional[PosterBrief] = Field(
+        None,
+        description="Set when is_poster_request=True. The parsed brief.",
+    )
+
+
+# Template kinds the design node may choose. Kept in sync with TEMPLATES in
+# tools.py so the LLM can only return values that have a real blueprint.
+TemplateKind = Literal[
+    "informational", "advertisement", "caution", "event", "minimal"
+]
+
+
+class ToolPlan(BaseModel):
+    """The design node's tool-usage plan.
+
+    The LLM emits this *before* we run any tool. Mandatory-ness of
+    pick_template is enforced at the schema level: ``template_kind`` is a
+    required field with a closed set of values. ``palette_mood`` is
+    optional — the LLM sets it to ``null`` when the user already specified
+    colors, and only then we skip the pick_palette call.
+    """
+
+    template_kind: TemplateKind = Field(
+        ...,
+        description="Which template best fits the brief. ALWAYS set this.",
+    )
+    template_reason: str = Field(
+        ..., description="One sentence: why this template fits the brief."
+    )
+    palette_mood: Optional[str] = Field(
+        None,
+        description=(
+            "Mood word for pick_palette ('bold', 'retro', 'minimal', etc). "
+            "Set to null ONLY when the user already specified a color palette."
+        ),
+    )
+    palette_reason: Optional[str] = Field(
+        None,
+        description="One sentence: why this mood. Null when palette_mood is null.",
+    )
+
+
+class DesignSpec(BaseModel):
+    """Concrete design plan produced by the design node, fed into generate."""
+
+    template_kind: TemplateKind
     mood: str = Field(..., description="One-word mood, e.g. 'bold', 'minimal'.")
     palette: list[str] = Field(
         ..., min_length=3, max_length=8,
@@ -56,7 +121,7 @@ class DesignSpec(BaseModel):
         ..., description="High-level layout family."
     )
     rationale: str = Field(
-        ..., description="1-2 sentence reasoning for these choices."
+        ..., description="1–2 sentence reasoning for these choices."
     )
 
 
@@ -68,15 +133,18 @@ class PosterDraft(BaseModel):
 
 
 class Critique(BaseModel):
-    """Self-critique. Fixed checklist for deterministic eval scoring."""
+    """Self-critique. Fixed checklist for deterministic eval scoring.
+
+    Currently unused at runtime — the critique node is wired but commented
+    out in agent_graph.py. The schema is kept here so flipping the loop
+    on is a one-character change.
+    """
 
     contrast_ok: bool
     alignment_ok: bool
     readability_ok: bool
     prompt_fidelity_ok: bool
-    issues: list[str] = Field(
-        default_factory=list, description="Concrete problems to fix."
-    )
+    issues: list[str] = Field(default_factory=list)
 
     @property
     def must_fix(self) -> bool:
@@ -94,28 +162,32 @@ class Critique(BaseModel):
 
 
 class GraphState(TypedDict, total=False):
-    """State that flows between graph nodes.
-
-    Use `NotRequired` for fields that are populated by later nodes, so the
-    initial state can be minimal.
-    """
+    """State that flows between graph nodes."""
 
     # Inputs from the API layer
     raw_prompt: str
     session_id: str
     use_memory: bool
-    history: NotRequired[list[str]]  # prior prompts when use_memory=True
+    history: NotRequired[list[str]]
 
-    # Populated by nodes
+    # Populated by validate node
+    validation: NotRequired[ValidationResult]
     brief: NotRequired[PosterBrief]
-    design: NotRequired[DesignSpec]
-    draft: NotRequired[PosterDraft]
-    critique: NotRequired[Critique]
 
-    # Loop control
+    # Populated by design node
+    tool_plan: NotRequired[ToolPlan]
+    template_info: NotRequired[dict]   # raw output of pick_template
+    palette_info: NotRequired[dict]    # raw output of pick_palette (if called)
+    design: NotRequired[DesignSpec]
+
+    # Populated by generate node
+    draft: NotRequired[PosterDraft]
+
+    # Critique loop (currently disabled)
+    critique: NotRequired[Critique]
     revisions_left: int
 
-    # Final output (set on terminal node)
+    # Terminal
     final: NotRequired[PosterDraft]
 
 
@@ -124,37 +196,29 @@ class GraphState(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    brief = PosterBrief(raw_prompt="x", title="Demo", user_specified_palette=False)
+    brief = PosterBrief(raw_prompt="x", title="Demo")
+    plan = ToolPlan(
+        template_kind="advertisement",
+        template_reason="hyping a launch",
+        palette_mood="bold",
+        palette_reason="energy",
+    )
+    val = ValidationResult(is_poster_request=True, brief=brief)
+    val_no = ValidationResult(
+        is_poster_request=False,
+        refusal_message="I only generate posters.",
+    )
     design = DesignSpec(
+        template_kind="advertisement",
         mood="bold",
         palette=["#000", "#111", "#fff"],
         font_pair={"heading": "Inter", "body": "Inter"},
         layout="hero",
         rationale="bold + readable",
     )
-    draft = PosterDraft(html="<div/>", css="*{}")
-    critique = Critique(
-        contrast_ok=True,
-        alignment_ok=True,
-        readability_ok=False,
-        prompt_fidelity_ok=True,
-        issues=["body text too small"],
-    )
 
-    state: GraphState = {
-        "raw_prompt": "demo",
-        "session_id": "s1",
-        "use_memory": False,
-        "revisions_left": 1,
-        "brief": brief,
-        "design": design,
-        "draft": draft,
-        "critique": critique,
-    }
-
-    assert critique.must_fix is True
+    assert val.is_poster_request and val.brief is not None
+    assert not val_no.is_poster_request and val_no.refusal_message
     print("schemas OK")
-    print("brief:", brief.model_dump())
+    print("plan:", plan.model_dump())
     print("design:", design.model_dump())
-    print("critique.must_fix:", critique.must_fix)
-    print("state keys:", sorted(state.keys()))

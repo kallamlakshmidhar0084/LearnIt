@@ -206,7 +206,7 @@ class GraphState(TypedDict):
 
 ---
 
-## Step 4 — Build the LangGraph  *(`agent_graph.py`)*
+## Step 4 — Build the LangGraph  *(`agent_graph.py`)*  ✅ DONE
 
 **What we're building.** The graph wiring (no prompt engineering yet — use
 placeholders that just echo). Nodes:
@@ -397,6 +397,10 @@ and the `session_id` filterable.
 | 1.2 | Per-node model choice | **Same model for all nodes** | Only one API key available (Gemini); also keeps v1 simple. Will note "split by node cost" as a production optimization. | 2026-05-03 |
 | 2.1 | Tools wiring | **Single `pick_palette` exposed as a LangGraph `@tool`** | One tool is enough to demonstrate tool-usage; LangGraph `@tool` + `ToolNode` lets the LLM decide whether to call it (skips when user already specified a palette) — that's the interview story. | 2026-05-03 |
 | 3.1 | Graph state vs. LLM output schemas | **`TypedDict` for graph state, Pydantic `BaseModel` for LLM-facing schemas**, all in `schemas.py` | Idiomatic LangGraph for state; Pydantic gives validation at every LLM boundary. | 2026-05-03 |
+| 4.1 | First node — input gate | **`validate` node** that checks if the prompt is a genuine poster request; on refusal returns a styled HTML/CSS message and routes to END | Real users send "hi" or "add two numbers"; we need a graceful refusal path before the agent burns tokens on design/generate. Validation also extracts the `PosterBrief` in the same LLM call to save tokens. | 2026-05-03 |
+| 4.2 | Tool-calling pattern | **LLM-driven tool plan via Pydantic** (`ToolPlan` schema) executed inside `design_node`; `pick_template` is **mandatory** (enforced by required schema field) and `pick_palette` is **optional** (`Optional[str]`, set only when user didn't specify colors) | Stays compatible with our litellm-based `llm_client` (no need for LangChain `bind_tools`). LLM still chooses *which* template + whether to call palette → preserves the agentic tool-usage story. Mandatory-ness is a schema invariant, not a runtime check. | 2026-05-03 |
+| 4.3 | Critique + revise loop | **Implemented but commented out** in `agent_graph.py` | API token budget. Code path is in place so we can flip it on later without restructuring the graph. | 2026-05-03 |
+| 4.4 | Brief parsing | **Done inside `validate_node`** (returned alongside `ValidationResult.brief`) | Single LLM call instead of separate validate + parse-brief nodes; no separate `parse_brief_node` needed. | 2026-05-03 |
 
 ---
 

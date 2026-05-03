@@ -1,21 +1,110 @@
 """Agent tools.
 
-For v1 we expose **one** tool — `pick_palette` — as a LangGraph-compatible
-`@tool`. The LLM decides whether to call it: when the user has already
-specified a palette in their brief, the LLM is instructed to skip the tool;
-otherwise it should invoke `pick_palette(mood=...)` and use the returned
-hex codes.
+Two tools live here for v1:
 
-Keeping the tool deterministic (no network, no randomness) makes traces
-reproducible and lets us assert on tool output during evals.
+1. ``pick_template`` — **mandatory**. Returns a poster template description
+   (informational, advertisement, caution, event, minimal). The LLM must
+   always pick one of these so the generate node has a clear blueprint to
+   follow.
+
+2. ``pick_palette`` — **optional**. Returns a 5-color hex palette for a
+   given mood. The LLM should call it only when the user has *not* already
+   specified colors in their brief — that demonstrates LLM-driven,
+   conditional tool-usage.
+
+Both tools are deterministic (no network, no randomness) so traces and
+RAGAS evaluations stay reproducible.
 """
 
 from __future__ import annotations
 
 from langchain_core.tools import tool
 
-# Curated palettes keyed by mood. Five hex codes per palette: bg, surface,
-# accent, text, muted.
+
+# ---------------------------------------------------------------------------
+# pick_template
+# ---------------------------------------------------------------------------
+
+# Every entry teaches the generate-node what kind of poster to compose.
+# The hints are written as instructions the LLM can follow verbatim.
+TEMPLATES: dict[str, dict[str, str]] = {
+    "informational": {
+        "name": "Informational",
+        "purpose": "Convey facts, schedules, or instructions clearly.",
+        "layout_hint": (
+            "Strong title at the top, a short subtitle, then 2–4 fact "
+            "blocks arranged in a grid. Footer with a source/credit line."
+        ),
+        "vibe_hint": "trustworthy, clear, generous whitespace, easy to scan",
+    },
+    "advertisement": {
+        "name": "Advertisement",
+        "purpose": "Sell a product or hype an event with a strong hook.",
+        "layout_hint": (
+            "Hero headline taking ~40% of the canvas, a single tagline, "
+            "a prominent call-to-action chip, and 2 supporting feature cells."
+        ),
+        "vibe_hint": "bold, energetic, high-contrast, confident",
+    },
+    "caution": {
+        "name": "Caution / Warning",
+        "purpose": "Warn or alert the viewer about a hazard or rule.",
+        "layout_hint": (
+            "Centered warning emblem area at the top, an unambiguous bold "
+            "warning headline, and 2–3 short safety bullet points underneath."
+        ),
+        "vibe_hint": "high-contrast, urgent, no decoration, unambiguous",
+    },
+    "event": {
+        "name": "Event",
+        "purpose": "Announce an event with date, venue, and atmosphere.",
+        "layout_hint": (
+            "Event title up top, a date+venue band in the middle, a tagline "
+            "or lineup section, and a small footer with ticket info."
+        ),
+        "vibe_hint": "atmospheric, inviting, slightly dramatic",
+    },
+    "minimal": {
+        "name": "Minimal",
+        "purpose": "Single concept, quote, or art-piece poster.",
+        "layout_hint": (
+            "One headline, one accent shape or color block, lots of "
+            "negative space. No grid, no decoration."
+        ),
+        "vibe_hint": "calm, premium, restrained, gallery-like",
+    },
+}
+
+
+@tool
+def pick_template(kind: str) -> dict:
+    """Pick a poster template blueprint.
+
+    You MUST call this tool exactly once. Choose the ``kind`` that best fits
+    the user's brief from this set:
+
+    - "informational"  → facts, schedules, instructions
+    - "advertisement"  → selling or hyping something
+    - "caution"        → warnings, hazards, rules
+    - "event"          → announcing an event with date/venue
+    - "minimal"        → quote, single concept, art piece
+
+    Returns a dict with the template's name, purpose, layout_hint, and
+    vibe_hint. The generate node will use these hints to compose HTML+CSS.
+    Unknown ``kind`` falls back to "informational".
+    """
+    key = (kind or "").strip().lower()
+    if key not in TEMPLATES:
+        key = "informational"
+    return {"kind": key, **TEMPLATES[key]}
+
+
+# ---------------------------------------------------------------------------
+# pick_palette
+# ---------------------------------------------------------------------------
+
+# Curated palettes keyed by mood. Five hex codes per palette ordered as
+# [bg, surface, accent, text, muted].
 _PALETTES: dict[str, list[str]] = {
     "bold":      ["#0b1020", "#1f2937", "#f97316", "#f9fafb", "#9ca3af"],
     "minimal":   ["#ffffff", "#f4f4f5", "#111827", "#27272a", "#a1a1aa"],
@@ -25,6 +114,7 @@ _PALETTES: dict[str, list[str]] = {
     "playful":   ["#fce7f3", "#f9a8d4", "#7c3aed", "#0f172a", "#64748b"],
     "tech":      ["#020617", "#0f172a", "#22d3ee", "#e2e8f0", "#64748b"],
     "nature":    ["#064e3b", "#065f46", "#84cc16", "#f0fdf4", "#a7f3d0"],
+    "warning":   ["#1c0a00", "#3f1d00", "#f59e0b", "#fffbeb", "#fde68a"],
     "default":   ["#0b1020", "#1f2937", "#6366f1", "#f9fafb", "#9ca3af"],
 }
 
@@ -33,7 +123,6 @@ def _normalize(mood: str) -> str:
     if not mood:
         return "default"
     m = mood.strip().lower()
-    # Pick the first known mood whose key appears as a substring.
     for key in _PALETTES:
         if key in m:
             return key
@@ -42,24 +131,25 @@ def _normalize(mood: str) -> str:
 
 @tool
 def pick_palette(mood: str) -> dict:
-    """Return a 5-color hex palette that matches the requested mood.
+    """Pick a 5-color hex palette for a mood.
 
-    Call this tool ONLY when the user has not already specified colors in
-    their brief. Pass a short mood word (e.g. "bold", "minimal", "retro",
-    "vibrant", "elegant", "playful", "tech", "nature"). Unknown moods fall
-    back to a sensible default palette.
+    Call this tool ONLY when the user did not specify colors in their brief.
+    Pass a short mood word — e.g. "bold", "minimal", "retro", "vibrant",
+    "elegant", "playful", "tech", "nature", "warning". Unknown moods fall
+    back to a sensible default.
 
-    Returns a dict with:
-      - mood: the matched mood key
-      - palette: list of 5 hex strings ordered as [bg, surface, accent, text, muted]
+    Returns a dict with ``mood`` (the matched key) and ``palette`` (a list
+    of 5 hex codes ordered as [bg, surface, accent, text, muted]).
     """
     matched = _normalize(mood)
     return {"mood": matched, "palette": _PALETTES[matched]}
 
 
-# Map exposed to the graph so `agent_graph.py` can build a ToolNode and the
-# nodes can also call tools directly when needed.
-TOOLS = [pick_palette]
+# ---------------------------------------------------------------------------
+# Registry — consumed by the graph
+# ---------------------------------------------------------------------------
+
+TOOLS = [pick_template, pick_palette]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
 
@@ -68,14 +158,16 @@ TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Direct .invoke is the public LangChain tool API.
-    out = pick_palette.invoke({"mood": "retro"})
-    assert out["mood"] == "retro"
-    assert len(out["palette"]) == 5
-    assert all(c.startswith("#") and len(c) == 7 for c in out["palette"])
+    t = pick_template.invoke({"kind": "advertisement"})
+    assert t["kind"] == "advertisement" and "layout_hint" in t
+    print("pick_template OK ->", t)
 
-    out_unknown = pick_palette.invoke({"mood": "weirdmood"})
-    assert out_unknown["mood"] == "default"
+    t_unknown = pick_template.invoke({"kind": "bogus"})
+    assert t_unknown["kind"] == "informational"
+    print("pick_template fallback OK")
 
-    print("pick_palette OK ->", out)
+    p = pick_palette.invoke({"mood": "retro"})
+    assert p["mood"] == "retro" and len(p["palette"]) == 5
+    print("pick_palette OK ->", p)
+
     print("registered tools:", list(TOOLS_BY_NAME))
