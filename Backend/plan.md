@@ -49,39 +49,52 @@ frontend doesn't change.
 
 ---
 
-## Step 0 — Lock the scope and contract  *(no code)*
+## Step 0 — Lock the scope and contract  *(no code)*  ✅ DONE
 
 **What we're building.** A short written agreement on:
 
 - Inputs: `prompt: str`, `session_id: str | None`, `use_memory: bool`.
-- Output schema: `{ html: str, css: str, rationale: str, palette: list[str],
-  session_id, used_memory, history_length }`.
+- Output schema: see Pydantic sketch below.
 - Non-goals (for v1): image generation, real font assets, multi-page posters,
   authentication, persistence beyond in-memory sessions.
 
-**Decisions to make.**
+**Decisions made.**
 
-1. **Single-shot vs. multi-turn agent.** Do we keep one graph that runs every
-   request, or split "generate" and "revise" into different graphs?
-   - *Single graph, branching on `use_memory`* → simpler, one trace per request,
-     easier to evaluate.
-   - *Two graphs* → cleaner per-flow prompts but doubles the surface area.
-   - **Recommend:** single graph; `use_memory` flips a conditional edge.
+1. **Single-shot vs. multi-turn agent.** ✅ **Single graph.**
+   *Why:* sufficient for this project; one trace per request, easier to
+   evaluate. Multi-graph deferred until a real requirement forces it.
+   `use_memory` will flip a conditional edge inside the single graph.
 
-2. **Where memory lives.** In-process dict (current), Redis, or LangGraph's
-   `MemorySaver` checkpointer?
-   - *Dict* → fine for demo, lost on restart.
-   - *`MemorySaver`* → idiomatic LangGraph, replays full state, gives you
-     "thread_id" semantics for free.
-   - **Recommend:** `MemorySaver` keyed by `session_id` — also lets us show
-     LangGraph state persistence in the interview.
+2. **Where memory lives.** ✅ **Plain in-memory dict (current `SESSIONS`).**
+   *Why:* keep what we have; don't add LangGraph `MemorySaver` yet. Easier to
+   reason about for v1. Swap to `MemorySaver` (or Postgres checkpointer) in
+   Step 9 if there's time, or when persistence becomes a real need.
 
-**Done when.** `plan.md` has these decisions written into it (we update this
-file as we go), and the response Pydantic model is sketched.
+### Response schema sketch
+
+```python
+# Returned by /api/generate (unchanged shape — frontend stays the same)
+class GenerateResponse(BaseModel):
+    session_id: str
+    html: str
+    css: str
+    used_memory: bool
+    history_length: int
+    # New, optional fields the agent will populate (frontend can ignore for now):
+    rationale: str | None = None        # 1-2 sentence design reasoning
+    palette: list[str] | None = None    # hex codes the design used
+```
+
+The two new fields (`rationale`, `palette`) are additive and optional, so
+adding them does not break the current frontend. We can surface them in the
+UI later as an "About this poster" panel.
+
+**Done when.** `plan.md` has these decisions written into it ✅, and the
+response Pydantic model is sketched ✅. Ready for Step 1.
 
 ---
 
-## Step 1 — `llm_client.py` upgrade  *(small)*
+## Step 1 — `llm_client.py` upgrade  *(small)*  ✅ DONE
 
 **What we're building.** A reusable function:
 
@@ -116,7 +129,7 @@ Pydantic instance, and is called from a tiny `__main__` smoke test.
 
 ---
 
-## Step 2 — `tools.py`  *(optional but interview-worthy)*
+## Step 2 — `tools.py`  *(optional but interview-worthy)*  ✅ DONE
 
 **What we're building.** A handful of deterministic, side-effect-free helpers
 the agent can call:
@@ -143,7 +156,7 @@ the agent can call:
 
 ---
 
-## Step 3 — Pydantic schemas for graph state  *(no LLM yet)*
+## Step 3 — Pydantic schemas for graph state  *(no LLM yet)*  ✅ DONE
 
 **What we're building.** All schemas in one place (top of `agent_graph.py` or a
 new `schemas.py`):
@@ -378,7 +391,12 @@ and the `session_id` filterable.
 
 | # | Decision | Chosen | Why | Date |
 |---|----------|--------|-----|------|
-|   | _filled in as each step is decided_ | | | |
+| 0.1 | Single graph vs. multi-graph for generate/follow-up | **Single graph** with conditional edge on `use_memory` | Sufficient for v1; one trace per request; revisit when a real requirement demands separate flows | 2026-05-03 |
+| 0.2 | Session memory backend | **In-memory `SESSIONS` dict** (current) | Keep what works; defer `MemorySaver` / Postgres checkpointer until persistence is a real need | 2026-05-03 |
+| 1.1 | Structured output mechanism | **Manual JSON-mode prompt + `model_validate_json` + 1 retry** | Most transparent; no extra deps; easy to explain in interview. Instructor mentioned as production upgrade. | 2026-05-03 |
+| 1.2 | Per-node model choice | **Same model for all nodes** | Only one API key available (Gemini); also keeps v1 simple. Will note "split by node cost" as a production optimization. | 2026-05-03 |
+| 2.1 | Tools wiring | **Single `pick_palette` exposed as a LangGraph `@tool`** | One tool is enough to demonstrate tool-usage; LangGraph `@tool` + `ToolNode` lets the LLM decide whether to call it (skips when user already specified a palette) — that's the interview story. | 2026-05-03 |
+| 3.1 | Graph state vs. LLM output schemas | **`TypedDict` for graph state, Pydantic `BaseModel` for LLM-facing schemas**, all in `schemas.py` | Idiomatic LangGraph for state; Pydantic gives validation at every LLM boundary. | 2026-05-03 |
 
 ---
 
