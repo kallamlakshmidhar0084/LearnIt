@@ -372,6 +372,59 @@ body {
   color: var(--muted);
 }
 
+/* Design notes (rationale + palette swatches) */
+.design-notes {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.design-notes__rationale {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.design-notes__swatches {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.swatch {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.swatch__label {
+  width: 100%;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 9px;
+  text-align: center;
+  padding: 2px 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #f9fafb;
+  letter-spacing: 0.02em;
+}
+
+/* Refusal variant of the right-side panel */
+.panel--refusal .panel-sub em {
+  color: #fbbf24;
+  font-style: normal;
+}
+
 .followup-form {
   display: flex;
   flex-direction: column;

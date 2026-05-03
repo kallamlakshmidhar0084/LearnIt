@@ -1,4 +1,5 @@
 import { useState } from "react";
+import DesignNotes from "./DesignNotes";
 
 export default function FollowUpPanel({
   history,
@@ -7,6 +8,8 @@ export default function FollowUpPanel({
   loading,
   error,
   sessionId,
+  rationale,
+  palette,
 }) {
   const [prompt, setPrompt] = useState("");
 
@@ -38,6 +41,8 @@ export default function FollowUpPanel({
           ＋ Generate New
         </button>
       </div>
+
+      <DesignNotes rationale={rationale} palette={palette} />
 
       <div className="history">
         {history.map((msg, i) => (

@@ -25,10 +25,13 @@ export async function generatePoster({ prompt, sessionId, useMemory }) {
 
   const data = await res.json();
   return {
+    kind: data.kind ?? "poster",
     sessionId: data.session_id,
     html: data.html,
     css: data.css,
     usedMemory: data.used_memory,
     historyLength: data.history_length,
+    rationale: data.rationale ?? null,
+    palette: data.palette ?? null,
   };
 }

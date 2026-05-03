@@ -9,6 +9,16 @@ const initialState = {
   error: null,
 };
 
+function posterFromResult(result) {
+  return {
+    kind: result.kind,
+    html: result.html,
+    css: result.css,
+    rationale: result.rationale,
+    palette: result.palette,
+  };
+}
+
 export function usePosterAgent() {
   const [state, setState] = useState(initialState);
 
@@ -22,7 +32,7 @@ export function usePosterAgent() {
       });
       setState({
         sessionId: result.sessionId,
-        poster: { html: result.html, css: result.css },
+        poster: posterFromResult(result),
         history: [{ role: "user", content: prompt, kind: "initial" }],
         status: "ready",
         error: null,
@@ -44,7 +54,7 @@ export function usePosterAgent() {
         setState((s) => ({
           ...s,
           sessionId: result.sessionId,
-          poster: { html: result.html, css: result.css },
+          poster: posterFromResult(result),
           history: [
             ...s.history,
             { role: "user", content: prompt, kind: "followup" },

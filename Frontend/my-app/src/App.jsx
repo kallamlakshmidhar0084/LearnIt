@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import PosterForm from "./components/PosterForm";
 import PosterPreview from "./components/PosterPreview";
 import FollowUpPanel from "./components/FollowUpPanel";
+import RefusalPanel from "./components/RefusalPanel";
 import { usePosterAgent } from "./hooks/usePosterAgent";
 import { checkHealth } from "./api/posterApi";
 import "./styles/app.css";
@@ -22,6 +23,8 @@ export default function App() {
 
   const loading = state.status === "loading";
   const showResult = state.poster !== null;
+  const wasRefused = showResult && state.poster.kind === "refusal";
+  const lastPrompt = state.history[state.history.length - 1]?.content;
 
   return (
     <div className="app">
@@ -63,14 +66,23 @@ export default function App() {
               />
             </section>
             <section className="stage-right">
-              <FollowUpPanel
-                history={state.history}
-                onFollowUp={followUp}
-                onGenerateNew={reset}
-                loading={loading}
-                error={state.error}
-                sessionId={state.sessionId}
-              />
+              {wasRefused ? (
+                <RefusalPanel
+                  onGenerateNew={reset}
+                  lastPrompt={lastPrompt}
+                />
+              ) : (
+                <FollowUpPanel
+                  history={state.history}
+                  onFollowUp={followUp}
+                  onGenerateNew={reset}
+                  loading={loading}
+                  error={state.error}
+                  sessionId={state.sessionId}
+                  rationale={state.poster.rationale}
+                  palette={state.poster.palette}
+                />
+              )}
             </section>
           </>
         )}
