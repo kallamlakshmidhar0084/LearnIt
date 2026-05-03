@@ -248,7 +248,7 @@ LLM responses and prints the final state.
 
 ---
 
-## Step 5 — `agent.py` wrapper
+## Step 5 — `agent.py` wrapper  ✅ DONE
 
 **What we're building.** A `PosterAgent` class with one method,
 `run(prompt, session_id, use_memory) -> dict`. It:
@@ -275,7 +275,7 @@ instead of `_mock_poster()`. Frontend works unchanged.
 
 ---
 
-## Step 6 — Prompt engineering pass  *(this is the big quality lever)*
+## Step 6 — Prompt engineering pass  *(this is the big quality lever)*  ✅ DONE
 
 **What we're building.** A `prompts.py` (or constants in each module) with:
 
@@ -308,7 +308,7 @@ prompts; v1 wins on a manual rubric. Save both in `prompts/_examples.md`.
 
 ---
 
-## Step 7 — LangSmith observability
+## Step 7 — LangSmith observability  ✅ DONE
 
 **What we're building.**
 
@@ -395,12 +395,22 @@ and the `session_id` filterable.
 | 0.2 | Session memory backend | **In-memory `SESSIONS` dict** (current) | Keep what works; defer `MemorySaver` / Postgres checkpointer until persistence is a real need | 2026-05-03 |
 | 1.1 | Structured output mechanism | **Manual JSON-mode prompt + `model_validate_json` + 1 retry** | Most transparent; no extra deps; easy to explain in interview. Instructor mentioned as production upgrade. | 2026-05-03 |
 | 1.2 | Per-node model choice | **Same model for all nodes** | Only one API key available (Gemini); also keeps v1 simple. Will note "split by node cost" as a production optimization. | 2026-05-03 |
-| 2.1 | Tools wiring | **Single `pick_palette` exposed as a LangGraph `@tool`** | One tool is enough to demonstrate tool-usage; LangGraph `@tool` + `ToolNode` lets the LLM decide whether to call it (skips when user already specified a palette) — that's the interview story. | 2026-05-03 |
+| 2.1 | Tools wiring | **Plain Python callables** (`pick_template`, `pick_palette`) dispatched via a `TOOLS: dict[str, Callable]` registry | Originally chose LangChain `@tool`. Walked it back after Step 7: we never use `bind_tools` or `ToolNode`, so `langchain-core` was added cost without runtime value. The agentic moment (LLM deciding whether to call `pick_palette`) is preserved in the Pydantic `ToolPlan` schema. | 2026-05-03 |
+| 2.2 | Drop `langchain-core` dependency | **Removed from `requirements.txt`** | Only used the `@tool` decorator's metadata; no runtime LangChain features were used. Keeping the stack lean: litellm (LLM) + langgraph (workflow) + langsmith (observability) + pydantic (schemas). | 2026-05-03 |
 | 3.1 | Graph state vs. LLM output schemas | **`TypedDict` for graph state, Pydantic `BaseModel` for LLM-facing schemas**, all in `schemas.py` | Idiomatic LangGraph for state; Pydantic gives validation at every LLM boundary. | 2026-05-03 |
 | 4.1 | First node — input gate | **`validate` node** that checks if the prompt is a genuine poster request; on refusal returns a styled HTML/CSS message and routes to END | Real users send "hi" or "add two numbers"; we need a graceful refusal path before the agent burns tokens on design/generate. Validation also extracts the `PosterBrief` in the same LLM call to save tokens. | 2026-05-03 |
 | 4.2 | Tool-calling pattern | **LLM-driven tool plan via Pydantic** (`ToolPlan` schema) executed inside `design_node`; `pick_template` is **mandatory** (enforced by required schema field) and `pick_palette` is **optional** (`Optional[str]`, set only when user didn't specify colors) | Stays compatible with our litellm-based `llm_client` (no need for LangChain `bind_tools`). LLM still chooses *which* template + whether to call palette → preserves the agentic tool-usage story. Mandatory-ness is a schema invariant, not a runtime check. | 2026-05-03 |
 | 4.3 | Critique + revise loop | **Implemented but commented out** in `agent_graph.py` | API token budget. Code path is in place so we can flip it on later without restructuring the graph. | 2026-05-03 |
 | 4.4 | Brief parsing | **Done inside `validate_node`** (returned alongside `ValidationResult.brief`) | Single LLM call instead of separate validate + parse-brief nodes; no separate `parse_brief_node` needed. | 2026-05-03 |
+| 5.1 | Sync vs. async invocation | **Async** end-to-end: async nodes, `achat`, `agent.arun()`, async FastAPI handler | Future-ready for streaming. LangGraph + litellm both support async natively. | 2026-05-03 |
+| 5.2 | Stream poster as it's built | **No streaming** for v1 | Iframe needs final HTML+CSS together to render. Re-evaluate when we add per-node status events. | 2026-05-03 |
+| 6.1 | Few-shot vs. zero-shot prompts | **Few-shot** for every node (validate, design tool plan, design spec, generate) | Few-shots stabilize structured output dramatically — the cost is worth it. | 2026-05-03 |
+| 6.2 | HTML constraint level | **Fixed outer skeleton with named sections** (`.poster__header`, `.poster__body`, `.poster__footer` + `.poster__cell` items); LLM only fills text, palette CSS variables, and inner cell content | Free-form HTML was unacceptably non-deterministic. Skeleton makes the result reproducible and easy to RAGAS-score. Creativity moves into copy and color usage. | 2026-05-03 |
+| 6.3 | A4 single-page constraint | **Hard rule baked into skeleton CSS** (`aspect-ratio: 1 / 1.4142`, no overflow) AND echoed in a 4-item checklist in the generate prompt | The whole product is "one page that prints to A4." Enforcing it in CSS *and* prompting double-locks it. | 2026-05-03 |
+| 7.1 | LangSmith credential source | **Reuse keys from `langgraph_exploration/.env`**, but switch project name to `poster-agent` | One LangSmith account, separate project keeps traces from mixing with the exploration project. | 2026-05-03 |
+| 7.2 | Tracing scope | **Both** — LangGraph nodes (auto-traced) + litellm LLM calls (explicitly traced via `@traceable`) | Node spans show "what" the agent did; LLM spans show prompts + tokens. Both views are needed to debug. | 2026-05-03 |
+| 7.3 | Token / metric tracking | **Attach `usage` (prompt/completion/total tokens, model name) as run-tree metadata** on every LLM span | LangSmith UI lets you filter and aggregate by metadata; tokens become queryable across runs. | 2026-05-03 |
+| 7.4 | Session correlation | **Pass `session_id` as graph-config metadata + tag** on every `ainvoke` | LangGraph propagates config metadata to all child runs, so every node and LLM span is filterable by session in LangSmith. | 2026-05-03 |
 
 ---
 

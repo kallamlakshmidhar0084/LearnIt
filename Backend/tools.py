@@ -12,13 +12,19 @@ Two tools live here for v1:
    specified colors in their brief — that demonstrates LLM-driven,
    conditional tool-usage.
 
+Both tools are plain Python callables. We orchestrate them manually from
+``design_node`` (Pydantic ``ToolPlan`` → call function → feed result back),
+so we don't need ``langchain_core.tools.@tool`` or a ``ToolNode``. LangSmith
+still records the calls because they execute inside an auto-traced
+LangGraph node span.
+
 Both tools are deterministic (no network, no randomness) so traces and
 RAGAS evaluations stay reproducible.
 """
 
 from __future__ import annotations
 
-from langchain_core.tools import tool
+from typing import Callable
 
 
 # ---------------------------------------------------------------------------
@@ -76,12 +82,11 @@ TEMPLATES: dict[str, dict[str, str]] = {
 }
 
 
-@tool
 def pick_template(kind: str) -> dict:
     """Pick a poster template blueprint.
 
-    You MUST call this tool exactly once. Choose the ``kind`` that best fits
-    the user's brief from this set:
+    The LLM MUST call this tool exactly once. Choose the ``kind`` that best
+    fits the user's brief from this set:
 
     - "informational"  → facts, schedules, instructions
     - "advertisement"  → selling or hyping something
@@ -129,14 +134,13 @@ def _normalize(mood: str) -> str:
     return "default"
 
 
-@tool
 def pick_palette(mood: str) -> dict:
     """Pick a 5-color hex palette for a mood.
 
-    Call this tool ONLY when the user did not specify colors in their brief.
-    Pass a short mood word — e.g. "bold", "minimal", "retro", "vibrant",
-    "elegant", "playful", "tech", "nature", "warning". Unknown moods fall
-    back to a sensible default.
+    The LLM should call this tool ONLY when the user did not specify colors
+    in their brief. Pass a short mood word — e.g. "bold", "minimal",
+    "retro", "vibrant", "elegant", "playful", "tech", "nature", "warning".
+    Unknown moods fall back to a sensible default.
 
     Returns a dict with ``mood`` (the matched key) and ``palette`` (a list
     of 5 hex codes ordered as [bg, surface, accent, text, muted]).
@@ -149,8 +153,10 @@ def pick_palette(mood: str) -> dict:
 # Registry — consumed by the graph
 # ---------------------------------------------------------------------------
 
-TOOLS = [pick_template, pick_palette]
-TOOLS_BY_NAME = {t.name: t for t in TOOLS}
+TOOLS: dict[str, Callable[..., dict]] = {
+    "pick_template": pick_template,
+    "pick_palette": pick_palette,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -158,16 +164,16 @@ TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    t = pick_template.invoke({"kind": "advertisement"})
+    t = pick_template(kind="advertisement")
     assert t["kind"] == "advertisement" and "layout_hint" in t
     print("pick_template OK ->", t)
 
-    t_unknown = pick_template.invoke({"kind": "bogus"})
+    t_unknown = pick_template(kind="bogus")
     assert t_unknown["kind"] == "informational"
     print("pick_template fallback OK")
 
-    p = pick_palette.invoke({"mood": "retro"})
+    p = pick_palette(mood="retro")
     assert p["mood"] == "retro" and len(p["palette"]) == 5
     print("pick_palette OK ->", p)
 
-    print("registered tools:", list(TOOLS_BY_NAME))
+    print("registered tools:", list(TOOLS))
