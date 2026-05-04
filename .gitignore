@@ -157,9 +157,7 @@ activemq-data/
 **/env.bak/
 **/venv.bak/
 
-# Node.js specific files
-**/package.json
-**/package-lock.json
+
 
 # Spyder project settings
 .spyderproject
