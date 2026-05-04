@@ -24,6 +24,7 @@ Decisions backing this design (see plan.md):
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Optional, Type, TypeVar, Union
 
@@ -31,21 +32,47 @@ from dotenv import load_dotenv
 from litellm import acompletion, completion
 from pydantic import BaseModel, ValidationError
 
-# LangSmith tracing — these decorators no-op gracefully if the API key is
-# missing, so the agent stays runnable even without observability configured.
+# LangSmith tracing — @traceable becomes a no-op when LANGSMITH_TRACING is off,
+# so the agent stays runnable without observability configured.
 from langsmith import traceable
-from langsmith.run_helpers import get_current_run_tree
+from langsmith.run_helpers import tracing_context
+from langsmith.run_trees import RunTree
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "False").lower() == "true"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+
+# litellm's Anthropic provider reads ANTHROPIC_API_KEY from env. Mirror our
+# CLAUDE_API_KEY into it so users only need to set one variable.
+if CLAUDE_API_KEY and not os.getenv("ANTHROPIC_API_KEY"):
+    os.environ["ANTHROPIC_API_KEY"] = CLAUDE_API_KEY
 
 # Single model for all nodes in v1 (decision 1.2). Production note: cheaper
 # nodes (plan / critique) could be routed to a smaller/local model.
-DEFAULT_REMOTE_MODEL = "gemini/gemini-2.5-flash"
+DEFAULT_REMOTE_MODEL = "anthropic/claude-haiku-4-5-20251001"
 DEFAULT_LOCAL_MODEL = "ollama/mistral:latest"
 LOCAL_API_BASE = "http://localhost:11434"
+
+_LANGSMITH_TRACING = os.getenv("LANGSMITH_TRACING", "").lower() == "true"
+
+# Startup confirmation — visible in app logs at import time.
+if LOCAL_MODEL:
+    logger.info("llm_client configured: model=%s (local)", DEFAULT_LOCAL_MODEL)
+elif CLAUDE_API_KEY:
+    logger.info(
+        "llm_client configured: model=%s, CLAUDE_API_KEY=set (len=%d), langsmith=%s",
+        DEFAULT_REMOTE_MODEL,
+        len(CLAUDE_API_KEY),
+        "on" if _LANGSMITH_TRACING else "off",
+    )
+else:
+    logger.warning(
+        "llm_client: CLAUDE_API_KEY is NOT set — remote calls to %s will fail",
+        DEFAULT_REMOTE_MODEL,
+    )
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -71,7 +98,7 @@ def _build_kwargs(
         kwargs["api_base"] = LOCAL_API_BASE
     else:
         kwargs["model"] = DEFAULT_REMOTE_MODEL
-        kwargs["api_key"] = GEMINI_API_KEY
+        kwargs["api_key"] = CLAUDE_API_KEY
     return kwargs
 
 
@@ -79,35 +106,28 @@ def _content(response: Any) -> str:
     return response["choices"][0]["message"]["content"]
 
 
-def _usage(response: Any) -> dict:
-    """Extract token usage from a litellm response in a forgiving way."""
-    try:
-        u = response.get("usage") if isinstance(response, dict) else response.usage
-    except Exception:
-        return {}
-    if u is None:
-        return {}
-    if hasattr(u, "model_dump"):
-        return u.model_dump()
-    if hasattr(u, "__dict__"):
-        return {k: v for k, v in u.__dict__.items() if not k.startswith("_")}
-    return dict(u)
+def _parent_from_config(config: Optional[dict]) -> Optional[RunTree]:
+    """Build a LangSmith RunTree parent from a LangGraph RunnableConfig.
 
+    `tracing_context(parent=...)` requires a fully-formed RunTree (with
+    `dotted_order` / `trace_id` populated). Passing a bare run-id string
+    triggers a `time data '' does not match format` ValueError inside
+    LangSmith's date parser. `RunTree.from_runnable_config` constructs the
+    proper parent from the LangChain callback manager LangGraph already set
+    up for the active node, so the LLM span attaches as a child of the node
+    instead of starting a new root.
 
-def _attach_metadata(*, model: str, usage: dict, tags: Optional[list[str]]) -> None:
-    """Attach model/usage/tag info to the current LangSmith run tree (if any).
-
-    Decision 7.3: tokens become queryable in LangSmith via run metadata.
+    Returns None if no parent can be derived (tracing then behaves as before
+    — the call still works, just at the top level).
     """
-    rt = get_current_run_tree()
-    if rt is None:
-        return
-    extra = {"model": model}
-    if usage:
-        extra["usage"] = usage
-    rt.metadata = (rt.metadata or {}) | extra
-    if tags:
-        rt.tags = list(set((rt.tags or []) + tags))
+    if not config:
+        return None
+    try:
+        return RunTree.from_runnable_config(config)
+    except Exception:
+        # Don't let tracing breakage take down the LLM call.
+        logger.debug("Could not derive RunTree from config", exc_info=True)
+        return None
 
 
 def _json_instruction(schema: dict) -> str:
@@ -165,18 +185,17 @@ def _retry_messages(prev: list[dict], raw: str, error: ValidationError) -> list[
 
 
 @traceable(run_type="llm", name="litellm.chat")
-def chat(
+def _chat_traced(
     messages: list[dict],
     *,
-    response_model: Optional[Type[T]] = None,
-    temperature: float = 0.4,
-    tags: Optional[list[str]] = None,
+    response_model: Optional[Type[T]],
+    temperature: float,
+    tags: Optional[list[str]],
 ) -> Union[str, T]:
-    """Sync LLM call. See module docstring."""
+    """Inner traced body — see ``chat`` for the public contract."""
     if response_model is None:
         kwargs = _build_kwargs(messages, temperature, tags)
         response = completion(**kwargs)
-        _attach_metadata(model=kwargs["model"], usage=_usage(response), tags=tags)
         return _content(response)
 
     schema = response_model.model_json_schema()
@@ -186,7 +205,6 @@ def chat(
     for _ in range(2):  # initial + 1 retry
         kwargs = _build_kwargs(augmented, temperature, tags)
         response = completion(**kwargs)
-        _attach_metadata(model=kwargs["model"], usage=_usage(response), tags=tags)
         raw = _strip_fences(_content(response))
         try:
             return response_model.model_validate_json(raw)
@@ -200,29 +218,46 @@ def chat(
     )
 
 
+def chat(
+    messages: list[dict],
+    *,
+    response_model: Optional[Type[T]] = None,
+    temperature: float = 0.4,
+    tags: Optional[list[str]] = None,
+    config: Optional[dict] = None,
+) -> Union[str, T]:
+    """Sync LLM call.
+
+    Pass the LangGraph node's ``config: RunnableConfig`` to make the LLM span
+    nest under the node's run in LangSmith.
+    """
+    parent = _parent_from_config(config)
+    with tracing_context(parent=parent):
+        return _chat_traced(
+            messages,
+            response_model=response_model,
+            temperature=temperature,
+            tags=tags,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Async entry point — used by the LangGraph nodes
 # ---------------------------------------------------------------------------
 
 
 @traceable(run_type="llm", name="litellm.achat")
-async def achat(
+async def _achat_traced(
     messages: list[dict],
     *,
-    response_model: Optional[Type[T]] = None,
-    temperature: float = 0.4,
-    tags: Optional[list[str]] = None,
+    response_model: Optional[Type[T]],
+    temperature: float,
+    tags: Optional[list[str]],
 ) -> Union[str, T]:
-    """Async LLM call. Mirrors ``chat`` exactly but uses ``litellm.acompletion``.
-
-    LangGraph nodes are async (decision 5.1) so they ``await achat(...)``
-    instead of calling ``chat(...)``. Behavior, retry policy, and tracing
-    are identical to the sync path.
-    """
+    """Inner traced body — see ``achat`` for the public contract."""
     if response_model is None:
         kwargs = _build_kwargs(messages, temperature, tags)
         response = await acompletion(**kwargs)
-        _attach_metadata(model=kwargs["model"], usage=_usage(response), tags=tags)
         return _content(response)
 
     schema = response_model.model_json_schema()
@@ -232,7 +267,6 @@ async def achat(
     for _ in range(2):
         kwargs = _build_kwargs(augmented, temperature, tags)
         response = await acompletion(**kwargs)
-        _attach_metadata(model=kwargs["model"], usage=_usage(response), tags=tags)
         raw = _strip_fences(_content(response))
         try:
             return response_model.model_validate_json(raw)
@@ -246,33 +280,44 @@ async def achat(
     )
 
 
+async def achat(
+    messages: list[dict],
+    *,
+    response_model: Optional[Type[T]] = None,
+    temperature: float = 0.4,
+    tags: Optional[list[str]] = None,
+    config: Optional[dict] = None,
+) -> Union[str, T]:
+    """Async LLM call. Mirrors ``chat`` exactly but uses ``litellm.acompletion``.
+
+    Pass the LangGraph node's ``config: RunnableConfig`` so the LLM span
+    nests under the node's run in LangSmith. Without it, the span still works
+    but appears as a top-level trace.
+    """
+    parent = _parent_from_config(config)
+    with tracing_context(parent=parent):
+        return await _achat_traced(
+            messages,
+            response_model=response_model,
+            temperature=temperature,
+            tags=tags,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Smoke tests — `python llm_client.py`
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import asyncio
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    print(f"LOCAL_MODEL={LOCAL_MODEL}")
+    model = DEFAULT_LOCAL_MODEL if LOCAL_MODEL else DEFAULT_REMOTE_MODEL
+    print(f"[smoke] LOCAL_MODEL={LOCAL_MODEL} model={model}")
+    print(f"[smoke] CLAUDE_API_KEY={'set' if CLAUDE_API_KEY else 'MISSING'}")
 
-    # 1) Free-form sync
     text = chat(
         [{"role": "user", "content": "Reply with the single word: ready"}],
         temperature=0.0,
     )
-    print("sync free-form:", text.strip())
-
-    # 2) Structured async
-    class Ping(BaseModel):
-        message: str
-        ok: bool
-
-    async def run_async():
-        return await achat(
-            [{"role": "user", "content": "Say ok with message 'hello'."}],
-            response_model=Ping,
-            temperature=0.0,
-        )
-
-    parsed = asyncio.run(run_async())
-    print("async structured:", parsed)
+    print(f"[smoke] response: {text.strip()!r}")
+    print("[smoke] OK — litellm + Anthropic configuration is working")

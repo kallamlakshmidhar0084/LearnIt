@@ -86,6 +86,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from llm_client import achat
@@ -194,7 +195,7 @@ def _run_tool(name: str, args: dict) -> dict:
 # ==============================================================================
 
 
-async def validate_node(state: GraphState) -> dict:
+async def validate_node(state: GraphState, config: RunnableConfig) -> dict:
     """The bouncer at the door. Either parses the brief or politely refuses."""
     raw_prompt = state["raw_prompt"]
 
@@ -215,6 +216,7 @@ async def validate_node(state: GraphState) -> dict:
         response_model=ValidationResult,
         temperature=0.0,
         tags=["node:validate"],
+        config=config,
     )
 
     # On refusal: set `final` immediately. The conditional edge below routes
@@ -268,7 +270,7 @@ def route_after_validate(state: GraphState) -> str:
 # ==============================================================================
 
 
-async def design_node(state: GraphState) -> dict:
+async def design_node(state: GraphState, config: RunnableConfig) -> dict:
     """Plan tools, run tools, then produce a concrete DesignSpec."""
     brief: PosterBrief = state["brief"]
 
@@ -289,6 +291,7 @@ async def design_node(state: GraphState) -> dict:
         response_model=ToolPlan,
         temperature=0.2,
         tags=["node:design", "phase:tool_plan"],
+        config=config,
     )
 
     # ---- (b) Run pick_template (always) ----------------------------------
@@ -338,6 +341,7 @@ async def design_node(state: GraphState) -> dict:
         response_model=DesignSpec,
         temperature=0.3,
         tags=["node:design", "phase:spec"],
+        config=config,
     )
 
     update: dict = {
@@ -362,7 +366,7 @@ async def design_node(state: GraphState) -> dict:
 # ==============================================================================
 
 
-async def generate_node(state: GraphState) -> dict:
+async def generate_node(state: GraphState, config: RunnableConfig) -> dict:
     """Compose the final HTML+CSS poster using the locked skeleton."""
     brief: PosterBrief = state["brief"]
     design: DesignSpec = state["design"]
@@ -388,6 +392,7 @@ async def generate_node(state: GraphState) -> dict:
         response_model=PosterDraft,
         temperature=0.6,
         tags=["node:generate"],
+        config=config,
     )
 
     return {"draft": draft, "final": draft}

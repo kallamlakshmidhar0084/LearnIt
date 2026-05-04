@@ -13,7 +13,8 @@ Two kinds of schemas live here:
 
 from __future__ import annotations
 
-from typing import Literal, NotRequired, Optional, TypedDict
+from typing import Literal, Optional, TypedDict
+from typing_extensions import NotRequired
 
 from pydantic import BaseModel, Field
 
